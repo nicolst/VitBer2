@@ -1,5 +1,11 @@
 import numpy as np
 import random
+import time
+
+import sys, collections
+from multiprocessing import Process as Task, Queue
+
+import asyncio
 
 import threading
 
@@ -14,6 +20,17 @@ plt.ion()
 
 k_b = 1.38064852 * 10**(-23)
 
+
+
+def print_progress(progress):
+    sys.stdout.write('\033[2J\033[H') #clear screen
+    for filename, percent in progress.items():
+        bar = ('=' * int(percent * 20)).ljust(20)
+        percent = int(percent * 100)
+        sys.stdout.write("%s [%s] %s%%\n" % (filename, bar, percent))
+    sys.stdout.flush()
+
+
 def latex_float(f):
     float_str = "{0:.2g}".format(f).lower()
     if "e" in float_str:
@@ -23,15 +40,17 @@ def latex_float(f):
     else:
         return float_str
 
-class Protein():
+class Protein(threading.Thread):
 
-    def __init__(self, polymer_length, T, d):
+    def __init__(self, polymer_length, T, d, status, name=None):
+        super().__init__(name=name)
         self.polymer_length = polymer_length
         self.T = T
         self.d = d
         self.N = polymer_length + 1 if polymer_length % 2 == 0 else polymer_length
         self.node_pos = self.N // 2
         self.node = (self.node_pos, self.node_pos)
+        self.status = status
 
         self.grid = np.zeros((self.N, self.N), dtype=np.int16)
         for i in range(1, polymer_length + 1):
@@ -44,52 +63,21 @@ class Protein():
             for j in range(0, self.N + 1):
                 if -1 <= (i - j) <= 1 or i == 0 or j == 0:
                     self.U[i][j] = 0
-        #print(self.U)
 
         self.current_energy = self.calculate_energy()
         self.energies = [self.current_energy]
 
 
 
-    def run(self, wait=False, animate=False):
-        if animate:
-            cm = plt.get_cmap("jet", self.polymer_length)
-            cm.set_bad(color='white')
-            fig = plt.matshow(np.ma.masked_where(self.grid == 0, self.grid), cmap=cm)
-            cb = plt.colorbar(spacing="uniform")
-            #labels = np.array([i for i in range(1, self.polymer_length + 1)])
-            labels = np.array([1, self.polymer_length])
-            loc = (labels + .5) / (self.polymer_length / (self.polymer_length - 1))
-            cb.set_ticks(loc)
-            cb.set_ticklabels(labels)
-            plt.axis('off')
-            plt.title(r"$T={3}$K, $d$: $ {0}$ of ${1}$, $E={2}$J".format(0, self.d, latex_float(self.current_energy), self.T))
-            if wait:
-                plt.show(block=True)
-            else:
-                plt.draw()
-                plt.pause(0.1)
+    def run(self, wait=False):
         for i in range(1, self.d + 1):
-
-            #print("D: {0}/{1}".format(i, self.d))
-
+            #print("{2} || D: {0}/{1}".format(i, self.d, self.name))
+            if self.T == 0.000001:
+                self.status.put([self.T, i / self.d])
             legal_twist = False
             while not legal_twist:
-                #if move_count == (self.polymer_length - 2) * 2:
-                #    move_count = -1
-                #    print("bah")
-                #    break
                 rnode_value = random.randint(2, self.polymer_length - 1)
                 rot_dir = 1 if random.randint(0, 1) == 0 else -1
-
-                #if rnode_value in moves_done.keys():
-                #    if len(moves_done[rnode_value]) == 2:
-                #        continue
-                #    elif rot_dir in moves_done[rnode_value]:
-                #       rot_dir *= -1
-                #        moves_done[rnode_value].append(rot_dir)
-                #else:
-                #    moves_done[rnode_value] = [rot_dir]
 
                 rnode_coord_arr = np.argwhere(self.grid == rnode_value)[0]
                 rnode_coord = [rnode_coord_arr[0], rnode_coord_arr[1]]
@@ -123,33 +111,12 @@ class Protein():
                 if new_energy < self.current_energy:
                     self.grid = new_grid
                     self.current_energy = new_energy
-
-                    #print("-----{1}-----------------{0}-------------------------\n".format(new_energy, np.argwhere(self.grid == 6)))
-                    #self.print_structure()
                 elif random.random() < np.exp(-(new_energy - self.current_energy)/(k_b * self.T)):
                     self.grid = new_grid
                     self.current_energy = new_energy
-                    #print("-------{2}--------------{0}-----------------{1}---------\n".format(new_energy, rnode_value, np.argwhere(self.grid == 6)))
-                    #self.print_structure()
 
             self.energies.append(self.current_energy)
 
-            if animate:
-                if wait:
-                    fig = plt.matshow(np.ma.masked_where(self.grid == 0, self.grid), cmap=cm)
-                    cb = plt.colorbar(spacing="uniform")
-                    cb.set_ticks(loc)
-                    cb.set_ticklabels(labels)
-                    plt.title(r"$T={3}$K, $d$: $ {0}$ of ${1}$, $E={2}$J".format(i, self.d, latex_float(self.current_energy), self.T))
-                    plt.axis('off')
-                    plt.show(block=True)
-                else:
-                    fig.set_data(np.ma.masked_where(self.grid == 0, self.grid))
-                    plt.title(r"$T={3}$K, $d$: $ {0}$ of ${1}$, $E={2}$J".format(i, self.d, latex_float(self.current_energy), self.T))
-                    plt.draw()
-                    plt.pause(0.1)
-            else:
-                print("D: {0}/{1}".format(i, self.d))
 
 
             #if move_count == -1:
@@ -206,21 +173,53 @@ class Protein():
 
 #plt.show(block=True)
 
-protein_1 = Protein(30, 0.000001, 20000)
-#protein_1 = Protein(15, 100, 10000)
-#protein_1 = Protein(15, 1000, 8000)
 
-protein_1.run()
+start = time.time()
+
+
+status = Queue()
+progress = collections.OrderedDict()
+
+protein = Protein(30, 1500, 600, status)
+
+temps = np.append(np.arange(1500, 0, -30), [0.000001])
+
+
+for temp in temps:
+    print("Temperature: {0}".format(temp))
+    protein.T = temp
+    protein.run()
+
+space = np.arange(0, (protein.d*len(temps)) + 1)
+
+averages = []
+for i in range(len(temps)):
+    averages.append(np.average(protein.energies[i*600:(i+1)*600]))
+
+
+end = time.time()
+
+time_taken = end - start
+
+plt.plot(space, protein.energies, linewidth=0.5, color='k', label="Energy")
+
+for i in range(1, len(temps)):
+    plt.axvline(x=i*600, color='r', linewidth=0.5, ymax=0.25,
+                label=(None if i > 1 else "Temp. change"))
+
+
+plt.ylabel(r"$E$ / J", size=14)
+plt.xlabel(r"$d$ / twists", size=14)
+plt.title("Energy as a function of amount of twists (took {0}s)".format(time_taken))
+
 plt.figure(2)
-d = np.arange(0, protein_1.d + 1)
-plt.plot(d, protein_1.energies)
-plt.title("prot 1")
+plt.plot(temps, averages, color='k')
+plt.xlabel(r"$T$ / K", size=14)
+plt.ylabel(r"$\langle E \rangle$ / J", size=14)
+plt.title("Mean energy as a function of temperature")
 
-plt.figure(3)
-mean = []
-for i in range(0, len(d)):
-    slice = protein_1.energies[:i+1]
-    mean.append(np.average(slice))
-plt.plot(d, mean)
+
+plt.legend(loc='upper right')
+print("Took {0} seconds".format(time_taken))
 
 plt.show(block=True)
